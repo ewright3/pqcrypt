@@ -1,0 +1,6 @@
+/pqcrypt
+/pqcrypt.exe
+/dist/
+*.pqc
+*.key
+*.pub
