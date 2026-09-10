@@ -22,6 +22,8 @@ import (
 //   kemCT      ML-KEM-768 ciphertext  mlkem768.CiphertextSize
 //   salt       HKDF salt              16 bytes
 //   npfx       AES-GCM nonce prefix   4 bytes
+//   nameLen    uint16 big-endian      2 bytes
+//   nameBlob   AES-256-GCM(original filename), nonce = npfx||2^64-1
 //   chunks...  repeated until EOF:
 //                len   uint32 big-endian  (length of the following blob)
 //                blob  AES-256-GCM(plaintext) incl. 16-byte tag
@@ -31,13 +33,19 @@ import (
 // The final chunk carries finalFlag=1, so truncation or extension is detected.
 
 const (
-	fileMagic    = "PQCRYPTF1"
+	fileMagic    = "PQCRYPTF2"
 	chunkPlain   = 64 * 1024
 	saltLen      = 16
 	noncePfxLen  = 4
 	hkdfInfo     = "pqcrypt v1 aes-256-gcm hybrid x25519+mlkem768"
+	filenameAAD  = "pqcrypt v2 filename"
+	maxNameLen   = 512
 	x25519KeyLen = 32
 )
+
+// filenameNonce is a fixed reserved counter value that data chunks
+// (counting up from 0) will never reach, so it can never collide.
+func filenameNonce(pfx []byte) []byte { return chunkNonce(pfx, ^uint64(0)) }
 
 func deriveAESKey(xShared, kemShared, salt []byte) ([]byte, error) {
 	ikm := make([]byte, 0, len(xShared)+len(kemShared))
@@ -68,7 +76,12 @@ func chunkAAD(counter uint64, final bool) []byte {
 }
 
 // Encrypt streams plaintext from r into ciphertext on w, sealed to pub.
-func Encrypt(w io.Writer, r io.Reader, pub *PublicKey) error {
+// origName is the plaintext's original filename; it is encrypted into the
+// container so decrypt can restore it. Pass "" to omit it.
+func Encrypt(w io.Writer, r io.Reader, pub *PublicKey, origName string) error {
+	if len(origName) > maxNameLen {
+		return fmt.Errorf("original filename too long (%d > %d)", len(origName), maxNameLen)
+	}
 	// Ephemeral X25519.
 	xEphPriv := make([]byte, x25519KeyLen)
 	if _, err := rand.Read(xEphPriv); err != nil {
@@ -129,6 +142,17 @@ func Encrypt(w io.Writer, r io.Reader, pub *PublicKey) error {
 		}
 	}
 
+	// Encrypted original filename.
+	sealedName := gcm.Seal(nil, filenameNonce(npfx), []byte(origName), []byte(filenameAAD))
+	var nlb [2]byte
+	binary.BigEndian.PutUint16(nlb[:], uint16(len(sealedName)))
+	if _, err := w.Write(nlb[:]); err != nil {
+		return err
+	}
+	if _, err := w.Write(sealedName); err != nil {
+		return err
+	}
+
 	buf := make([]byte, chunkPlain)
 	var counter uint64
 	for {
@@ -155,8 +179,11 @@ func Encrypt(w io.Writer, r io.Reader, pub *PublicKey) error {
 	}
 }
 
-// Decrypt streams ciphertext from r into plaintext on w, using priv.
-func Decrypt(w io.Writer, r io.Reader, priv *PrivateKey) error {
+// Decrypt reads a container from r, using priv. Once the (authenticated)
+// original filename is recovered it calls openOut(origName) to obtain the
+// writer for the plaintext, then streams the body into it. openOut may
+// ignore the name (e.g. when the caller passed an explicit -out path).
+func Decrypt(r io.Reader, priv *PrivateKey, openOut func(origName string) (io.Writer, error)) error {
 	magic := make([]byte, len(fileMagic))
 	if _, err := io.ReadFull(r, magic); err != nil {
 		return errors.New("not a pqcrypt file (truncated header)")
@@ -202,6 +229,25 @@ func Decrypt(w io.Writer, r io.Reader, priv *PrivateKey) error {
 		return err
 	}
 	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return err
+	}
+
+	// Encrypted original filename.
+	var nlb [2]byte
+	if _, err := io.ReadFull(r, nlb[:]); err != nil {
+		return errors.New("truncated header (filename length)")
+	}
+	nameBlob := make([]byte, binary.BigEndian.Uint16(nlb[:]))
+	if _, err := io.ReadFull(r, nameBlob); err != nil {
+		return errors.New("truncated header (filename)")
+	}
+	nameBytes, err := gcm.Open(nil, filenameNonce(npfx), nameBlob, []byte(filenameAAD))
+	if err != nil {
+		return errors.New("header failed authentication (wrong key or corrupt file)")
+	}
+
+	w, err := openOut(string(nameBytes))
 	if err != nil {
 		return err
 	}

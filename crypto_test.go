@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"io"
 	"testing"
 )
 
@@ -22,17 +23,27 @@ func roundTrip(t *testing.T, size int) {
 	rand.Read(plain)
 
 	var ct bytes.Buffer
-	if err := Encrypt(&ct, bytes.NewReader(plain), &id.Pub); err != nil {
+	if err := Encrypt(&ct, bytes.NewReader(plain), &id.Pub, "orig.bin"); err != nil {
 		t.Fatalf("encrypt: %v", err)
 	}
 	var out bytes.Buffer
-	if err := Decrypt(&out, bytes.NewReader(ct.Bytes()), id); err != nil {
+	gotName := ""
+	err := Decrypt(bytes.NewReader(ct.Bytes()), id, func(name string) (io.Writer, error) {
+		gotName = name
+		return &out, nil
+	})
+	if err != nil {
 		t.Fatalf("decrypt: %v", err)
+	}
+	if gotName != "orig.bin" {
+		t.Fatalf("filename not restored: %q", gotName)
 	}
 	if !bytes.Equal(plain, out.Bytes()) {
 		t.Fatalf("round trip mismatch at size %d", size)
 	}
 }
+
+func discard(name string) (io.Writer, error) { return io.Discard, nil }
 
 func TestRoundTripSizes(t *testing.T) {
 	for _, s := range []int{0, 1, 100, chunkPlain - 1, chunkPlain, chunkPlain + 1, 3*chunkPlain + 7} {
@@ -43,10 +54,10 @@ func TestRoundTripSizes(t *testing.T) {
 func TestWrongKeyFails(t *testing.T) {
 	a, b := newIdentity(t), newIdentity(t)
 	var ct bytes.Buffer
-	if err := Encrypt(&ct, bytes.NewReader([]byte("hello")), &a.Pub); err != nil {
+	if err := Encrypt(&ct, bytes.NewReader([]byte("hello")), &a.Pub, "x"); err != nil {
 		t.Fatal(err)
 	}
-	if err := Decrypt(&bytes.Buffer{}, bytes.NewReader(ct.Bytes()), b); err == nil {
+	if err := Decrypt(bytes.NewReader(ct.Bytes()), b, discard); err == nil {
 		t.Fatal("decrypt with wrong key should fail")
 	}
 }
@@ -56,11 +67,11 @@ func TestTruncationDetected(t *testing.T) {
 	plain := make([]byte, 3*chunkPlain)
 	rand.Read(plain)
 	var ct bytes.Buffer
-	if err := Encrypt(&ct, bytes.NewReader(plain), &id.Pub); err != nil {
+	if err := Encrypt(&ct, bytes.NewReader(plain), &id.Pub, "x"); err != nil {
 		t.Fatal(err)
 	}
 	cut := ct.Bytes()[:ct.Len()-200] // drop part of the final chunk
-	if err := Decrypt(&bytes.Buffer{}, bytes.NewReader(cut), id); err == nil {
+	if err := Decrypt(bytes.NewReader(cut), id, discard); err == nil {
 		t.Fatal("truncated ciphertext should fail")
 	}
 }

@@ -15,7 +15,9 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"golang.org/x/term"
@@ -207,7 +209,7 @@ func cmdEncrypt(args []string) error {
 		return err
 	}
 
-	if err := Encrypt(out, in, pub); err != nil {
+	if err := Encrypt(out, in, pub, filepath.Base(inPath)); err != nil {
 		out.Close()
 		os.Remove(outPath)
 		return err
@@ -225,16 +227,7 @@ func cmdDecrypt(args []string) error {
 	if keyPath == "" || inPath == "" {
 		return errors.New("decrypt: -key and -in are required")
 	}
-	outPath := f["out"]
-	if outPath == "" {
-		outPath = strings.TrimSuffix(inPath, ".pqc")
-		if outPath == inPath {
-			outPath = inPath + ".dec"
-		}
-	}
-	if _, err := os.Stat(outPath); err == nil {
-		return fmt.Errorf("refusing to overwrite existing %s", outPath)
-	}
+	forcedOut := f["out"] // may be ""
 
 	keyArmor, err := readFileTrim(keyPath)
 	if err != nil {
@@ -254,19 +247,57 @@ func cmdDecrypt(args []string) error {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(outPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
+
+	// The output path depends on the authenticated original filename, which
+	// Decrypt only knows after reading the header, so it hands it back here.
+	var outPath string
+	var outFile *os.File
+	open := func(origName string) (io.Writer, error) {
+		switch {
+		case forcedOut != "":
+			outPath = forcedOut
+		default:
+			name := sanitizeName(origName)
+			if name == "" {
+				name = strings.TrimSuffix(filepath.Base(inPath), ".pqc")
+				if name == filepath.Base(inPath) {
+					name += ".dec"
+				}
+			}
+			outPath = filepath.Join(filepath.Dir(inPath), name)
+		}
+		if _, err := os.Stat(outPath); err == nil {
+			return nil, fmt.Errorf("refusing to overwrite existing %s", outPath)
+		}
+		outFile, err = os.OpenFile(outPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		return outFile, err
 	}
 
-	if err := Decrypt(out, in, priv); err != nil {
-		out.Close()
-		os.Remove(outPath)
+	if err := Decrypt(in, priv, open); err != nil {
+		if outFile != nil {
+			outFile.Close()
+			os.Remove(outPath)
+		}
 		return err
 	}
-	if err := out.Close(); err != nil {
+	if err := outFile.Close(); err != nil {
 		return err
 	}
 	fmt.Printf("decrypted %s -> %s\n", inPath, outPath)
 	return nil
+}
+
+// sanitizeName reduces an embedded filename to a bare, safe basename:
+// no directory components, no drive letters, no "." / ".." .
+func sanitizeName(name string) string {
+	name = strings.ReplaceAll(name, "\\", "/")
+	if i := strings.LastIndexByte(name, '/'); i >= 0 {
+		name = name[i+1:]
+	}
+	name = strings.ReplaceAll(name, ":", "_")
+	name = strings.TrimSpace(name)
+	if name == "." || name == ".." {
+		return ""
+	}
+	return name
 }

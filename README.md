@@ -61,8 +61,14 @@ pqcrypt encrypt -pub alice.pub -in report.pdf
 #   -> report.pdf.pqc
 
 # 3. Alice decrypts with her private key
-pqcrypt decrypt -key alice.key -in report.pdf.pqc -out report.pdf
+pqcrypt decrypt -key alice.key -in report.pdf.pqc
+#   -> report.pdf   (original name is stored, encrypted, in the container)
 ```
+
+The original filename is encrypted into the container, so decrypt restores it
+even if the `.pqc` file was renamed. It is written next to the input file;
+pass `-out PATH` to choose the location yourself. Embedded names are reduced to
+a bare basename on extraction (no directory or drive components).
 
 ### Passphrase sources (`-pass`)
 
@@ -79,6 +85,6 @@ Existing output files are never overwritten.
 
 - No signatures yet — a file proves it was encrypted to your key, not *who*
   sent it. Add ML-DSA (Dilithium) if you need sender authentication.
-- The container format is versioned (`PQCRYPTF1`); future changes bump the magic.
+- The container format is versioned (`PQCRYPTF2`); future changes bump the magic.
 - Uses `github.com/cloudflare/circl` for ML-KEM and `golang.org/x/crypto` for
   X25519 / HKDF / Argon2id.
