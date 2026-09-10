@@ -22,7 +22,35 @@ reordering, or extension of a ciphertext is detected on decrypt.
 `encrypt`/`decrypt` handle one file. `archive`/`extract` bundle a filtered file
 tree into a single container with the same AEAD stream — see [Archives](#archives-bulk--filtering).
 
-## Build
+## Install
+
+### Download a prebuilt binary
+
+Grab one from the [latest release](https://github.com/ewright3/pqcrypt/releases/latest).
+Every binary is fully static (CGO disabled) — no runtime, nothing to install.
+
+| File | Platform |
+|------|----------|
+| `pqcrypt-windows-amd64.exe` | Windows, Intel/AMD |
+| `pqcrypt-windows-arm64.exe` | Windows on ARM |
+| `pqcrypt-macos-arm64` | macOS, Apple Silicon (M1+) |
+| `pqcrypt-macos-amd64` | macOS, Intel |
+| `pqcrypt-linux-amd64` | Linux, Intel/AMD |
+| `pqcrypt-linux-arm64` | Linux, ARM |
+
+```sh
+# example: Linux x86-64
+VER=v0.1.1
+curl -LO https://github.com/ewright3/pqcrypt/releases/download/$VER/pqcrypt-linux-amd64
+curl -LO https://github.com/ewright3/pqcrypt/releases/download/$VER/SHA256SUMS.txt
+sha256sum -c SHA256SUMS.txt --ignore-missing
+chmod +x pqcrypt-linux-amd64
+```
+
+On macOS the binary is unsigned, so also run
+`xattr -d com.apple.quarantine pqcrypt-macos-*` (or right-click → Open once).
+
+### Build from source
 
 Single platform:
 
@@ -35,21 +63,6 @@ All platforms at once (Windows / macOS / Linux, amd64 + arm64):
 ```
 ./build.sh        # outputs to dist/ with SHA256SUMS.txt
 ```
-
-CGO is disabled, so every binary is fully static with no runtime dependency.
-Pick the one for your OS/CPU:
-
-| File | Platform |
-|------|----------|
-| `pqcrypt-windows-amd64.exe` | Windows, Intel/AMD |
-| `pqcrypt-windows-arm64.exe` | Windows on ARM |
-| `pqcrypt-macos-arm64` | macOS, Apple Silicon (M1+) |
-| `pqcrypt-macos-amd64` | macOS, Intel |
-| `pqcrypt-linux-amd64` | Linux, Intel/AMD |
-| `pqcrypt-linux-arm64` | Linux, ARM |
-
-On macOS/Linux: `chmod +x pqcrypt-*` before first run. macOS may require
-`xattr -d com.apple.quarantine pqcrypt-macos-*` since the binary is unsigned.
 
 ## Use
 
