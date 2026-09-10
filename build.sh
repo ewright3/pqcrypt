@@ -5,6 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 export CGO_ENABLED=0
+export GOTOOLCHAIN=local   # build with the installed Go, no auto-download
 OUT=dist
 rm -rf "$OUT" && mkdir "$OUT"
 

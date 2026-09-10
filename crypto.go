@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -12,18 +13,18 @@ import (
 	"github.com/cloudflare/circl/kem/mlkem/mlkem768"
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/hkdf"
-	"crypto/sha256"
 )
 
 // On-disk container format:
 //
-//   magic      "PQCRYPTF1"            9 bytes
+//   magic      "PQCRYPTF3"            9 bytes
+//   ctype      content-type byte      1 byte   (see CT* constants)
 //   xEphPub    X25519 ephemeral pub   32 bytes
 //   kemCT      ML-KEM-768 ciphertext  mlkem768.CiphertextSize
 //   salt       HKDF salt              16 bytes
 //   npfx       AES-GCM nonce prefix   4 bytes
 //   nameLen    uint16 big-endian      2 bytes
-//   nameBlob   AES-256-GCM(original filename), nonce = npfx||2^64-1
+//   nameBlob   AES-256-GCM(name), nonce = npfx||2^64-1, AAD = filenameAAD
 //   chunks...  repeated until EOF:
 //                len   uint32 big-endian  (length of the following blob)
 //                blob  AES-256-GCM(plaintext) incl. 16-byte tag
@@ -33,7 +34,7 @@ import (
 // The final chunk carries finalFlag=1, so truncation or extension is detected.
 
 const (
-	fileMagic    = "PQCRYPTF2"
+	fileMagic    = "PQCRYPTF3"
 	chunkPlain   = 64 * 1024
 	saltLen      = 16
 	noncePfxLen  = 4
@@ -41,6 +42,13 @@ const (
 	filenameAAD  = "pqcrypt v2 filename"
 	maxNameLen   = 512
 	x25519KeyLen = 32
+)
+
+// Content types stored in the header's ctype byte.
+const (
+	CTFile    byte = 0 // body is a single file's bytes
+	CTTar     byte = 1 // body is an uncompressed tar stream
+	CTTarZstd byte = 2 // body is a zstd-compressed tar stream
 )
 
 // filenameNonce is a fixed reserved counter value that data chunks
@@ -75,14 +83,14 @@ func chunkAAD(counter uint64, final bool) []byte {
 	return a
 }
 
-// Encrypt streams plaintext from r into ciphertext on w, sealed to pub.
-// origName is the plaintext's original filename; it is encrypted into the
-// container so decrypt can restore it. Pass "" to omit it.
-func Encrypt(w io.Writer, r io.Reader, pub *PublicKey, origName string) error {
-	if len(origName) > maxNameLen {
-		return fmt.Errorf("original filename too long (%d > %d)", len(origName), maxNameLen)
+// SealStream encrypts everything read from r to pub, writing the container to w.
+// ctype records what the plaintext body is; name is an advisory label (a
+// filename, or a suggested output directory for archives) stored encrypted.
+func SealStream(w io.Writer, r io.Reader, pub *PublicKey, ctype byte, name string) error {
+	if len(name) > maxNameLen {
+		return fmt.Errorf("name too long (%d > %d)", len(name), maxNameLen)
 	}
-	// Ephemeral X25519.
+
 	xEphPriv := make([]byte, x25519KeyLen)
 	if _, err := rand.Read(xEphPriv); err != nil {
 		return err
@@ -99,7 +107,6 @@ func Encrypt(w io.Writer, r io.Reader, pub *PublicKey, origName string) error {
 		return errors.New("x25519: degenerate shared secret")
 	}
 
-	// ML-KEM-768 encapsulation.
 	scheme := mlkem768.Scheme()
 	kemPub, err := scheme.UnmarshalBinaryPublicKey(pub.MLKEM)
 	if err != nil {
@@ -132,8 +139,10 @@ func Encrypt(w io.Writer, r io.Reader, pub *PublicKey, origName string) error {
 		return err
 	}
 
-	// Header.
 	if _, err := w.Write([]byte(fileMagic)); err != nil {
+		return err
+	}
+	if _, err := w.Write([]byte{ctype}); err != nil {
 		return err
 	}
 	for _, part := range [][]byte{xEphPub, kemCT, salt, npfx} {
@@ -142,8 +151,7 @@ func Encrypt(w io.Writer, r io.Reader, pub *PublicKey, origName string) error {
 		}
 	}
 
-	// Encrypted original filename.
-	sealedName := gcm.Seal(nil, filenameNonce(npfx), []byte(origName), []byte(filenameAAD))
+	sealedName := gcm.Seal(nil, filenameNonce(npfx), []byte(name), []byte(filenameAAD))
 	var nlb [2]byte
 	binary.BigEndian.PutUint16(nlb[:], uint16(len(sealedName)))
 	if _, err := w.Write(nlb[:]); err != nil {
@@ -179,119 +187,153 @@ func Encrypt(w io.Writer, r io.Reader, pub *PublicKey, origName string) error {
 	}
 }
 
-// Decrypt reads a container from r, using priv. Once the (authenticated)
-// original filename is recovered it calls openOut(origName) to obtain the
-// writer for the plaintext, then streams the body into it. openOut may
-// ignore the name (e.g. when the caller passed an explicit -out path).
-func Decrypt(r io.Reader, priv *PrivateKey, openOut func(origName string) (io.Writer, error)) error {
+// OpenStream authenticates and parses a container header from r, then returns a
+// reader that decrypts the body on demand. The body reader authenticates each
+// chunk before yielding its bytes and returns an error at EOF if the stream was
+// truncated (missing final chunk) or extended (trailing data).
+func OpenStream(r io.Reader, priv *PrivateKey) (ctype byte, name string, body io.Reader, err error) {
 	magic := make([]byte, len(fileMagic))
-	if _, err := io.ReadFull(r, magic); err != nil {
-		return errors.New("not a pqcrypt file (truncated header)")
+	if _, err = io.ReadFull(r, magic); err != nil {
+		return 0, "", nil, errors.New("not a pqcrypt container (truncated header)")
 	}
 	if string(magic) != fileMagic {
-		return errors.New("not a pqcrypt file (bad magic)")
+		return 0, "", nil, errors.New("not a pqcrypt container (bad magic)")
 	}
+	var cb [1]byte
+	if _, err = io.ReadFull(r, cb[:]); err != nil {
+		return 0, "", nil, errors.New("truncated header")
+	}
+	ctype = cb[0]
 
 	xEphPub := make([]byte, x25519KeyLen)
 	kemCT := make([]byte, mlkem768.CiphertextSize)
 	salt := make([]byte, saltLen)
 	npfx := make([]byte, noncePfxLen)
 	for _, part := range [][]byte{xEphPub, kemCT, salt, npfx} {
-		if _, err := io.ReadFull(r, part); err != nil {
-			return errors.New("truncated header")
+		if _, err = io.ReadFull(r, part); err != nil {
+			return 0, "", nil, errors.New("truncated header")
 		}
 	}
 
 	xShared, err := curve25519.X25519(priv.X25519, xEphPub)
 	if err != nil {
-		return err
+		return 0, "", nil, err
 	}
 	if isAllZero(xShared) {
-		return errors.New("x25519: degenerate shared secret")
+		return 0, "", nil, errors.New("x25519: degenerate shared secret")
 	}
 
 	scheme := mlkem768.Scheme()
 	kemPriv, err := scheme.UnmarshalBinaryPrivateKey(priv.MLKEM)
 	if err != nil {
-		return fmt.Errorf("bad ml-kem private key: %w", err)
+		return 0, "", nil, fmt.Errorf("bad ml-kem private key: %w", err)
 	}
 	kemShared, err := scheme.Decapsulate(kemPriv, kemCT)
 	if err != nil {
-		return err
+		return 0, "", nil, err
 	}
 
 	key, err := deriveAESKey(xShared, kemShared, salt)
 	if err != nil {
-		return err
+		return 0, "", nil, err
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return err
+		return 0, "", nil, err
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return err
+		return 0, "", nil, err
 	}
 
-	// Encrypted original filename.
 	var nlb [2]byte
-	if _, err := io.ReadFull(r, nlb[:]); err != nil {
-		return errors.New("truncated header (filename length)")
+	if _, err = io.ReadFull(r, nlb[:]); err != nil {
+		return 0, "", nil, errors.New("truncated header (name length)")
 	}
 	nameBlob := make([]byte, binary.BigEndian.Uint16(nlb[:]))
-	if _, err := io.ReadFull(r, nameBlob); err != nil {
-		return errors.New("truncated header (filename)")
+	if _, err = io.ReadFull(r, nameBlob); err != nil {
+		return 0, "", nil, errors.New("truncated header (name)")
 	}
 	nameBytes, err := gcm.Open(nil, filenameNonce(npfx), nameBlob, []byte(filenameAAD))
 	if err != nil {
-		return errors.New("header failed authentication (wrong key or corrupt file)")
+		return 0, "", nil, errors.New("header failed authentication (wrong key or corrupt container)")
 	}
 
-	w, err := openOut(string(nameBytes))
-	if err != nil {
-		return err
-	}
+	return ctype, string(nameBytes), &bodyReader{r: r, gcm: gcm, npfx: npfx}, nil
+}
 
-	var counter uint64
-	sawFinal := false
+// bodyReader decrypts the chunked body produced by SealStream.
+type bodyReader struct {
+	r       io.Reader
+	gcm     cipher.AEAD
+	npfx    []byte
+	counter uint64
+	pending []byte
+	sawFin  bool
+	done    bool
+	err     error
+}
+
+func (b *bodyReader) Read(p []byte) (int, error) {
 	for {
+		if len(b.pending) > 0 {
+			n := copy(p, b.pending)
+			b.pending = b.pending[n:]
+			return n, nil
+		}
+		if b.err != nil {
+			return 0, b.err
+		}
+		if b.done {
+			return 0, io.EOF
+		}
+
 		var lenb [4]byte
-		_, err := io.ReadFull(r, lenb[:])
-		if err == io.EOF {
-			if !sawFinal {
-				return errors.New("ciphertext ends without a final chunk (truncated?)")
+		_, e := io.ReadFull(b.r, lenb[:])
+		if e == io.EOF {
+			if !b.sawFin {
+				b.err = errors.New("container ends without a final chunk (truncated?)")
+				return 0, b.err
 			}
-			return nil
+			b.done = true
+			return 0, io.EOF
 		}
-		if err != nil {
-			return errors.New("truncated chunk length")
+		if e != nil {
+			b.err = errors.New("truncated chunk length")
+			return 0, b.err
 		}
-		if sawFinal {
-			return errors.New("trailing data after final chunk (tampered?)")
+		if b.sawFin {
+			b.err = errors.New("trailing data after final chunk (tampered?)")
+			return 0, b.err
 		}
 		clen := binary.BigEndian.Uint32(lenb[:])
 		if clen < 16 || clen > chunkPlain+16 {
-			return fmt.Errorf("implausible chunk length %d", clen)
+			b.err = fmt.Errorf("implausible chunk length %d", clen)
+			return 0, b.err
 		}
 		blob := make([]byte, clen)
-		if _, err := io.ReadFull(r, blob); err != nil {
-			return errors.New("truncated chunk body")
+		if _, e := io.ReadFull(b.r, blob); e != nil {
+			b.err = errors.New("truncated chunk body")
+			return 0, b.err
 		}
 
-		// Try final=false first, then final=true; only one AAD can authenticate.
-		pt, err := gcm.Open(nil, chunkNonce(npfx, counter), blob, chunkAAD(counter, false))
-		if err != nil {
-			pt, err = gcm.Open(nil, chunkNonce(npfx, counter), blob, chunkAAD(counter, true))
-			if err != nil {
-				return fmt.Errorf("chunk %d failed authentication (wrong key or corrupt)", counter)
+		pt, e := b.gcm.Open(nil, chunkNonce(b.npfx, b.counter), blob, chunkAAD(b.counter, false))
+		if e != nil {
+			pt, e = b.gcm.Open(nil, chunkNonce(b.npfx, b.counter), blob, chunkAAD(b.counter, true))
+			if e != nil {
+				b.err = fmt.Errorf("chunk %d failed authentication (wrong key or corrupt)", b.counter)
+				return 0, b.err
 			}
-			sawFinal = true
+			b.sawFin = true
 		}
-		if _, err := w.Write(pt); err != nil {
-			return err
-		}
-		counter++
+		b.counter++
+		b.pending = pt
 	}
+}
+
+// Encrypt is the single-file convenience wrapper over SealStream.
+func Encrypt(w io.Writer, r io.Reader, pub *PublicKey, name string) error {
+	return SealStream(w, r, pub, CTFile, name)
 }
 
 func isAllZero(b []byte) bool {

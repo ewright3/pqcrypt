@@ -4,3 +4,9 @@
 *.pqc
 *.key
 *.pub
+
+# local scratch / manual-test debris
+*.bak
+/true
+*.jpeg
+*.jpg

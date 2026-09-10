@@ -26,24 +26,33 @@ func roundTrip(t *testing.T, size int) {
 	if err := Encrypt(&ct, bytes.NewReader(plain), &id.Pub, "orig.bin"); err != nil {
 		t.Fatalf("encrypt: %v", err)
 	}
-	var out bytes.Buffer
-	gotName := ""
-	err := Decrypt(bytes.NewReader(ct.Bytes()), id, func(name string) (io.Writer, error) {
-		gotName = name
-		return &out, nil
-	})
+	ctype, name, body, err := OpenStream(bytes.NewReader(ct.Bytes()), id)
 	if err != nil {
-		t.Fatalf("decrypt: %v", err)
+		t.Fatalf("open: %v", err)
 	}
-	if gotName != "orig.bin" {
-		t.Fatalf("filename not restored: %q", gotName)
+	if ctype != CTFile {
+		t.Fatalf("ctype = %d, want CTFile", ctype)
 	}
-	if !bytes.Equal(plain, out.Bytes()) {
+	if name != "orig.bin" {
+		t.Fatalf("filename not restored: %q", name)
+	}
+	out, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !bytes.Equal(plain, out) {
 		t.Fatalf("round trip mismatch at size %d", size)
 	}
 }
 
-func discard(name string) (io.Writer, error) { return io.Discard, nil }
+func drain(id *PrivateKey, ct []byte) error {
+	_, _, body, err := OpenStream(bytes.NewReader(ct), id)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(io.Discard, body)
+	return err
+}
 
 func TestRoundTripSizes(t *testing.T) {
 	for _, s := range []int{0, 1, 100, chunkPlain - 1, chunkPlain, chunkPlain + 1, 3*chunkPlain + 7} {
@@ -57,7 +66,7 @@ func TestWrongKeyFails(t *testing.T) {
 	if err := Encrypt(&ct, bytes.NewReader([]byte("hello")), &a.Pub, "x"); err != nil {
 		t.Fatal(err)
 	}
-	if err := Decrypt(bytes.NewReader(ct.Bytes()), b, discard); err == nil {
+	if err := drain(b, ct.Bytes()); err == nil {
 		t.Fatal("decrypt with wrong key should fail")
 	}
 }
@@ -71,8 +80,23 @@ func TestTruncationDetected(t *testing.T) {
 		t.Fatal(err)
 	}
 	cut := ct.Bytes()[:ct.Len()-200] // drop part of the final chunk
-	if err := Decrypt(bytes.NewReader(cut), id, discard); err == nil {
+	if err := drain(id, cut); err == nil {
 		t.Fatal("truncated ciphertext should fail")
+	}
+}
+
+func TestTamperDetected(t *testing.T) {
+	id := newIdentity(t)
+	plain := make([]byte, 5000)
+	rand.Read(plain)
+	var ct bytes.Buffer
+	if err := Encrypt(&ct, bytes.NewReader(plain), &id.Pub, "x"); err != nil {
+		t.Fatal(err)
+	}
+	b := ct.Bytes()
+	b[len(b)-50] ^= 0x01 // flip a bit in the final chunk
+	if err := drain(id, b); err == nil {
+		t.Fatal("tampered ciphertext should fail")
 	}
 }
 

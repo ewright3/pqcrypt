@@ -19,6 +19,9 @@ and protected against a future quantum adversary ("harvest now, decrypt later").
 Each chunk authenticates its index and an end-of-stream flag, so truncation,
 reordering, or extension of a ciphertext is detected on decrypt.
 
+`encrypt`/`decrypt` handle one file. `archive`/`extract` bundle a filtered file
+tree into a single container with the same AEAD stream — see [Archives](#archives-bulk--filtering).
+
 ## Build
 
 Single platform:
@@ -70,6 +73,47 @@ even if the `.pqc` file was renamed. It is written next to the input file;
 pass `-out PATH` to choose the location yourself. Embedded names are reduced to
 a bare basename on extraction (no directory or drive components).
 
+### Archives (bulk + filtering)
+
+Bundle a tree into **one** encrypted, integrity-protected container:
+
+```
+# whole directory (zstd-compressed by default)
+pqcrypt archive -pub alice.pub -out proj.pqc proj/
+
+# filter: only Go sources, skip vendored deps
+pqcrypt archive -pub alice.pub -out src.pqc -i!*.go -x!*/node_modules/* proj/
+
+# no compression, feed an explicit file list (from find/grep/PowerShell)
+find . -name '*.csv' -newer .last | \
+  pqcrypt archive -pub alice.pub -out data.pqc --compress none @-
+
+# extract (writes to a temp dir, promoted only after the whole stream verifies)
+pqcrypt extract -key alice.key -in proj.pqc            # -> ./proj/
+pqcrypt extract -key alice.key -in proj.pqc -o dest --overwrite
+pqcrypt extract -key alice.key -in data.pqc --verify-first
+```
+
+| Flag | Meaning |
+|------|---------|
+| `-i!GLOB` / `-x!GLOB` | include / exclude, repeatable; matched against basename and (if the pattern has a `/`) the full path |
+| `--compress none\|fast\|best` | zstd level; default `fast` |
+| `-L` | follow symlinks (store target contents); otherwise symlinks and special files are skipped with a notice |
+| `@listfile` / `@-` | read newline-separated paths from a file or stdin |
+| `--verify-first` | authenticate the entire archive before writing any file (two passes; needs a seekable input) |
+| `--overwrite` | merge into an existing output directory |
+
+A directory argument is stored relative to its parent (`proj/…`), so an absolute
+path doesn't bury the tree. Member paths are sanitized on extraction — absolute
+paths, drive letters, and `..` escapes are rejected.
+
+The whole archive is one AEAD stream: any bit flip, truncation, or added/removed
+member fails extraction. **Caveat**: extraction is streaming, so with a tampered
+archive some earlier files may already be written to the temp dir before the
+failure is detected — the temp dir is then removed, but use `--verify-first` if
+you need a hard guarantee that nothing is written unless the whole archive is
+intact.
+
 ### Passphrase sources (`-pass`)
 
 | Value | Meaning |
@@ -85,6 +129,11 @@ Existing output files are never overwritten.
 
 - No signatures yet — a file proves it was encrypted to your key, not *who*
   sent it. Add ML-DSA (Dilithium) if you need sender authentication.
-- The container format is versioned (`PQCRYPTF2`); future changes bump the magic.
-- Uses `github.com/cloudflare/circl` for ML-KEM and `golang.org/x/crypto` for
-  X25519 / HKDF / Argon2id.
+- The container format is versioned (`PQCRYPTF3`; a 1-byte content-type marks
+  file vs. tar vs. tar+zstd). Future changes bump the magic.
+- `--compress` uses zstd; compress-then-encrypt leaks plaintext compressibility
+  via ciphertext length. Use `--compress none` if that matters for your data.
+- No archive index: `extract` streams the whole container; there is no "list"
+  or single-member extract, and no in-place update.
+- Uses `github.com/cloudflare/circl` (ML-KEM), `golang.org/x/crypto`
+  (X25519 / HKDF / Argon2id), and `github.com/klauspost/compress` (zstd).
