@@ -137,3 +137,7 @@ Existing output files are never overwritten.
   or single-member extract, and no in-place update.
 - Uses `github.com/cloudflare/circl` (ML-KEM), `golang.org/x/crypto`
   (X25519 / HKDF / Argon2id), and `github.com/klauspost/compress` (zstd).
+
+## License
+
+BSD 3-Clause. See [LICENSE](LICENSE).
