@@ -10,7 +10,7 @@
 //	pqcrypt keygen  -out NAME [-pass SOURCE]
 //	pqcrypt encrypt -pub NAME.pub -in FILE [-out FILE.pqc]
 //	pqcrypt decrypt -key NAME.key -in FILE.pqc [-out FILE] [-pass SOURCE]
-//	pqcrypt archive -pub NAME.pub -out ARC.pqc [-r] [-i!GLOB] [-x!GLOB]
+//	pqcrypt archive -pub NAME.pub -out ARC.pqc [--match GLOB] [--ignore GLOB]
 //	                [--compress none|fast|best] [-L] PATH... | @listfile
 //	pqcrypt extract -key NAME.key -in ARC.pqc [-o DIR] [--verify-first]
 //	                [--overwrite] [-pass SOURCE]
@@ -70,12 +70,11 @@ func usage() {
 
   pqcrypt archive -pub NAME.pub -out ARC.pqc [options] PATH... | @listfile
       Bundle files/directories into one encrypted, integrity-protected archive.
-        -r               recurse pattern matches into subdirectories
-        -i!GLOB          include only entries matching GLOB (repeatable)
-        -x!GLOB          exclude entries matching GLOB (repeatable)
-        --compress X     none | fast (default) | best
+        --match GLOB      include only entries matching GLOB (repeatable)
+        --ignore GLOB     exclude entries matching GLOB (repeatable)
+        --compress X      none | fast (default) | best
         -L               follow symlinks (store their target's contents)
-        @listfile        read newline-separated paths from a file ("@-" = stdin)
+        @listfile         read newline-separated paths from a file ("@-" = stdin)
 
   pqcrypt extract -key NAME.key -in ARC.pqc [-o DIR] [-pass SOURCE]
       Extract an archive. Writes to a temp dir, promoted only after the whole
@@ -135,12 +134,6 @@ func parseMulti(args []string, boolNames ...string) multiArgs {
 	m := multiArgs{str: map[string]string{}, list: map[string][]string{}, flag: map[string]bool{}}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if strings.HasPrefix(a, "-i!") || strings.HasPrefix(a, "-x!") {
-			key := a[1:2]
-			val := a[3:]
-			m.list[key] = append(m.list[key], val)
-			continue
-		}
 		if !strings.HasPrefix(a, "-") || a == "-" {
 			m.pos = append(m.pos, a)
 			continue
@@ -372,7 +365,7 @@ func cmdDecrypt(args []string) error {
 }
 
 func cmdArchive(args []string) error {
-	a := parseMulti(args, "r", "L", "dereference")
+	a := parseMulti(args, "L", "dereference")
 	pubPath := a.str["pub"]
 	outPath := a.str["out"]
 	if pubPath == "" || outPath == "" {
@@ -393,7 +386,7 @@ func cmdArchive(args []string) error {
 	}
 	deref := a.flag["L"] || a.flag["dereference"]
 
-	members, skipped, err := collectMembers(roots, listFile, a.list["i"], a.list["x"], deref)
+	members, skipped, err := collectMembers(roots, listFile, a.list["match"], a.list["ignore"], deref)
 	if err != nil {
 		return err
 	}

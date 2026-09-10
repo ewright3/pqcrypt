@@ -82,7 +82,7 @@ Bundle a tree into **one** encrypted, integrity-protected container:
 pqcrypt archive -pub alice.pub -out proj.pqc proj/
 
 # filter: only Go sources, skip vendored deps
-pqcrypt archive -pub alice.pub -out src.pqc -i!*.go -x!*/node_modules/* proj/
+pqcrypt archive -pub alice.pub -out src.pqc --match '*.go' --ignore '*/node_modules/*' proj/
 
 # no compression, feed an explicit file list (from find/grep/PowerShell)
 find . -name '*.csv' -newer .last | \
@@ -96,7 +96,7 @@ pqcrypt extract -key alice.key -in data.pqc --verify-first
 
 | Flag | Meaning |
 |------|---------|
-| `-i!GLOB` / `-x!GLOB` | include / exclude, repeatable; matched against basename and (if the pattern has a `/`) the full path |
+| `--match GLOB` / `--ignore GLOB` | include / exclude, repeatable; matched against the basename and (if the pattern has a `/`) the full path |
 | `--compress none\|fast\|best` | zstd level; default `fast` |
 | `-L` | follow symlinks (store target contents); otherwise symlinks and special files are skipped with a notice |
 | `@listfile` / `@-` | read newline-separated paths from a file or stdin |
