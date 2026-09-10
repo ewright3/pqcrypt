@@ -82,11 +82,13 @@ func parseFlags(args []string) map[string]string {
 			m[a[:eq]] = a[eq+1:]
 			continue
 		}
+		// Every flag in this CLI takes a value; a flag with nothing (or
+		// another flag) after it is recorded as empty, not as "true".
 		if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 			m[a] = args[i+1]
 			i++
 		} else {
-			m[a] = "true"
+			m[a] = ""
 		}
 	}
 	return m
