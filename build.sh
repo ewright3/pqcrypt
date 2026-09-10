@@ -23,5 +23,5 @@ build darwin  arm64 pqcrypt-macos-arm64
 build linux   amd64 pqcrypt-linux-amd64
 build linux   arm64 pqcrypt-linux-arm64
 
-( cd "$OUT" && sha256sum ./* > SHA256SUMS.txt )
+( cd "$OUT" && sha256sum pqcrypt-* > SHA256SUMS.txt )
 echo "done. checksums in $OUT/SHA256SUMS.txt"
